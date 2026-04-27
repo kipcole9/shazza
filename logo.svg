@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Shazza — constellation fingerprint</title>
+
+  <!-- Rounded-square background, slate-900. -->
+  <rect x="0" y="0" width="256" height="256" rx="36" ry="36" fill="#0F172A"/>
+
+  <!-- Faint horizontal frequency bands so the constellation reads as a
+       spectrogram rather than free-floating stars. -->
+  <g stroke="#1E293B" stroke-width="1" opacity="0.7">
+    <line x1="32"  y1="80"  x2="224" y2="80"/>
+    <line x1="32"  y1="128" x2="224" y2="128"/>
+    <line x1="32"  y1="176" x2="224" y2="176"/>
+  </g>
+
+  <!-- Hash-pair lines: each connects an anchor peak to a target peak
+       forward in time (left-to-right). Sky-400, slightly heavier
+       stroke so the structure survives at favicon thumbnail size. -->
+  <g stroke="#38BDF8" stroke-width="2" opacity="0.8" fill="none" stroke-linecap="round">
+    <line x1="48"  y1="84"  x2="124" y2="88"/>
+    <line x1="48"  y1="84"  x2="96"  y2="124"/>
+    <line x1="124" y1="88"  x2="168" y2="80"/>
+    <line x1="96"  y1="124" x2="144" y2="136"/>
+    <line x1="96"  y1="124" x2="184" y2="124"/>
+    <line x1="144" y1="136" x2="196" y2="176"/>
+    <line x1="100" y1="172" x2="152" y2="184"/>
+    <line x1="168" y1="80"  x2="208" y2="92"/>
+  </g>
+
+  <!-- Peak dots: white, varying radii to suggest magnitude. Three rows
+       roughly aligned with the frequency bands. -->
+  <g fill="#F8FAFC">
+    <!-- top band -->
+    <circle cx="48"  cy="84"  r="4.5"/>
+    <circle cx="88"  cy="76"  r="3"/>
+    <circle cx="124" cy="88"  r="5"/>
+    <circle cx="168" cy="80"  r="4"/>
+    <circle cx="208" cy="92"  r="3"/>
+    <!-- middle band -->
+    <circle cx="60"  cy="132" r="3"/>
+    <circle cx="96"  cy="124" r="5"/>
+    <circle cx="144" cy="136" r="4"/>
+    <circle cx="184" cy="124" r="4"/>
+    <!-- bottom band -->
+    <circle cx="56"  cy="180" r="4"/>
+    <circle cx="100" cy="172" r="3.5"/>
+    <circle cx="152" cy="184" r="5"/>
+    <circle cx="196" cy="176" r="3"/>
+  </g>
+</svg>

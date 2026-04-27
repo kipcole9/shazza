@@ -1,0 +1,503 @@
+# Shazza: How It Works
+
+```elixir
+Mix.install(
+  [
+    {:shazza, path: Path.expand("..", __DIR__)},
+    {:kino, "~> 0.14"},
+    {:vega_lite, "~> 0.1"},
+    {:kino_vega_lite, "~> 0.1"}
+  ],
+  config: [
+    nx: [default_backend: EXLA.Backend, default_defn_options: [compiler: EXLA]]
+  ]
+)
+
+alias VegaLite, as: Vl
+```
+
+## What we're building
+
+This notebook walks through Shazza, an Elixir implementation of the audio
+fingerprinting algorithm Avery Wang published in
+[*An Industrial-Strength Audio Search Algorithm* (Wang, 2003)][paper] —
+the algorithm Shazam uses to identify a song from a few seconds of mic
+audio.
+
+Five steps turn an audio file into a searchable fingerprint, plus one
+more to identify a query against a stored index:
+
+1. **Decode** the audio to mono PCM at a fixed sample rate.
+2. **STFT** the PCM into a time-frequency spectrogram.
+3. **Pick peaks** — keep only the loudest local landmarks.
+4. **Hash pairs** of peaks into a compact, position-invariant key.
+5. **Index** every `(hash → track_id, anchor_time)` posting.
+6. **Match** a query by histogramming time offsets across the index.
+
+Every cell below executes the *real* Shazza code from the sibling
+project. We use a synthetic 8-second three-tone chord as input so the
+visualisations stay readable; on real music the same pipeline produces
+many more peaks and a much busier constellation.
+
+[paper]: https://www.ee.columbia.edu/~dpwe/papers/Wang03-shazam.pdf
+
+## 0. The test signal
+
+Before any of the algorithm runs, we need an input. Synthesise an
+8-second chord made of three sine waves at 440 Hz, 660 Hz, and 880 Hz —
+roughly an A-major triad — and write it to a temp WAV.
+
+```elixir
+fixture_path = Path.join(System.tmp_dir!(), "shazza_demo_chord.wav")
+
+unless File.exists?(fixture_path) do
+  inputs =
+    Enum.flat_map([440, 660, 880], fn freq ->
+      ["-f", "lavfi", "-i", "sine=frequency=#{freq}:duration=8"]
+    end)
+
+  args =
+    ["-y", "-loglevel", "error"] ++
+      inputs ++
+      ["-filter_complex", "amix=inputs=3", "-ac", "1", "-ar", "44100", fixture_path]
+
+  {_, 0} = System.cmd("ffmpeg", args)
+end
+
+%{path: fixture_path, size_bytes: File.stat!(fixture_path).size}
+```
+
+Look at the first 50 ms of the waveform — three superimposed sines
+should be obvious as periodic interference. We use Shazza's actual
+decoder so this also exercises step 1 of the pipeline.
+
+```elixir
+{:ok, %{samples: samples, sample_rate: sample_rate, duration_ms: duration_ms}} =
+  Shazza.Audio.Decoder.decode(fixture_path)
+
+n_show = div(sample_rate, 20)
+
+waveform =
+  samples
+  |> Nx.slice([0], [n_show])
+  |> Nx.to_flat_list()
+  |> Enum.with_index()
+  |> Enum.map(fn {amp, i} -> %{t_ms: i * 1000 / sample_rate, amplitude: amp} end)
+
+Vl.new(width: 700, height: 220, title: "First 50 ms of the chord (8 kHz mono)")
+|> Vl.data_from_values(waveform)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "t_ms", type: :quantitative, title: "time (ms)")
+|> Vl.encode_field(:y, "amplitude", type: :quantitative, title: "PCM (-1..1)")
+```
+
+> **What this is:** `Shazza.Audio.Decoder.decode/1` shells through Xav
+> (an Elixir NIF wrapping FFmpeg) to produce a 1-D `Nx.Tensor` of
+> floats. Sample rate is 8 kHz mono — narrowband is plenty for music
+> identification (Wang 2003, §2.1). The full pipeline elsewhere uses
+> `Decoder.stream/1` to keep memory bounded for hours-long inputs, but
+> for an 8-second clip the in-memory version is simpler.
+
+## 1. STFT — turning audio into time × frequency
+
+The waveform alone is the wrong shape for fingerprinting: we need to
+ask "which frequencies are loud, *when*?". The Short-Time Fourier
+Transform answers that. Cut the signal into overlapping windows of
+1024 samples (128 ms at 8 kHz), apply a Hann window to each, run an
+FFT, take magnitude, drop the redundant Nyquist bin, and convert to
+log-scale dB.
+
+```elixir
+spec = Shazza.DSP.STFT.spectrogram(samples)
+{n_frames, n_bins} = Nx.shape(spec)
+hop_size = Shazza.Config.get(:hop_size)
+window_size = Shazza.Config.get(:window_size)
+
+%{
+  shape: {n_frames, n_bins},
+  hop_seconds: hop_size / sample_rate,
+  bin_hz: sample_rate / window_size,
+  duration_seconds: duration_ms / 1000
+}
+```
+
+Plot the spectrogram as a heatmap. The three sine peaks should appear
+as horizontal stripes at 440 / 660 / 880 Hz; the y-axis is bins, so the
+stripes land near bin numbers 56, 84, and 113.
+
+```elixir
+# Subsample to keep VegaLite responsive: ~200 frames × ~256 bins.
+frame_stride = max(1, div(n_frames, 200))
+bin_stride = max(1, div(n_bins, 256))
+
+spec_points =
+  spec
+  |> Nx.to_list()
+  |> Stream.with_index()
+  |> Stream.filter(fn {_row, f} -> rem(f, frame_stride) == 0 end)
+  |> Enum.flat_map(fn {row, f} ->
+    time_s = f * hop_size / sample_rate
+
+    row
+    |> Stream.with_index()
+    |> Stream.filter(fn {_db, b} -> rem(b, bin_stride) == 0 end)
+    |> Enum.map(fn {db, b} ->
+      %{time_s: time_s, freq_hz: b * sample_rate / window_size, db: db}
+    end)
+  end)
+
+Vl.new(width: 700, height: 360, title: "Log-magnitude spectrogram")
+|> Vl.data_from_values(spec_points)
+|> Vl.mark(:rect)
+|> Vl.encode_field(:x, "time_s", type: :quantitative, title: "time (s)")
+|> Vl.encode_field(:y, "freq_hz", type: :quantitative, title: "frequency (Hz)")
+|> Vl.encode_field(:color, "db", type: :quantitative, scale: [scheme: "viridis"])
+```
+
+> **What this is:** `Shazza.DSP.STFT.spectrogram/1` calls
+> `NxSignal.stft/3` with a Hann window, fft_length = `:window_size`,
+> overlap = window − hop, then keeps the first `window/2` bins
+> (real-FFT, no Nyquist), takes magnitude, and applies `log10`. Phase
+> is discarded — we don't need it for landmarks. This corresponds to
+> §2.1 of Wang's paper: "spectrogram with a Hanning window". With our
+> defaults each STFT frame represents 32 ms of audio and each frequency
+> bin is 7.81 Hz wide.
+
+## 2. Peak picking — keeping only the loud landmarks
+
+Most of the spectrogram is noise floor. Wang's key insight: **discard
+almost everything**, keep only points that are local maxima *and* that
+clear an adaptive density threshold. The result is a sparse
+**constellation map** — Wang 2003, §2.2 — robust to noise because peaks
+are the parts of the signal least likely to be drowned out.
+
+Two filters in sequence:
+
+1. **2-D local maximum.** A point `(t, f)` survives only if it is the
+   max value within a `21 × 21` rectangular neighborhood centred on it.
+   Implemented as `Nx.window_max` followed by an equality check.
+2. **Adaptive top-K.** Among the local maxima, take only the top
+   `peaks_per_second × duration` by magnitude. This normalises peak
+   count across loud and quiet recordings, so the inverted index isn't
+   dominated by tracks with high overall energy.
+
+```elixir
+peaks = Shazza.DSP.Peaks.pick(spec)
+%{n_peaks: length(peaks), per_second: length(peaks) * sample_rate / Nx.size(samples)}
+```
+
+Overlay the picked peaks on the spectrogram and the structure is
+unmistakable — three horizontal lines at the source frequencies plus a
+sprinkle of harmonic / windowing artefacts.
+
+```elixir
+peak_points =
+  Enum.map(peaks, fn {t, b} ->
+    %{
+      time_s: t * hop_size / sample_rate,
+      freq_hz: b * sample_rate / window_size
+    }
+  end)
+
+Vl.new(width: 700, height: 360, title: "Picked peaks (constellation map)")
+|> Vl.layers([
+  Vl.new()
+  |> Vl.data_from_values(spec_points)
+  |> Vl.mark(:rect, opacity: 0.6)
+  |> Vl.encode_field(:x, "time_s", type: :quantitative, title: "time (s)")
+  |> Vl.encode_field(:y, "freq_hz", type: :quantitative, title: "frequency (Hz)")
+  |> Vl.encode_field(:color, "db", type: :quantitative, scale: [scheme: "viridis"]),
+  Vl.new()
+  |> Vl.data_from_values(peak_points)
+  |> Vl.mark(:circle, color: "white", size: 40, stroke: "black", stroke_width: 0.5)
+  |> Vl.encode_field(:x, "time_s", type: :quantitative)
+  |> Vl.encode_field(:y, "freq_hz", type: :quantitative)
+])
+```
+
+> **What this is:** `Shazza.DSP.Peaks.pick/1` runs everything on EXLA-
+> compiled Nx ops: `Nx.pad` (with `-∞`) → `Nx.window_max` → equality
+> mask → `Nx.top_k`. The adaptive threshold is the
+> `peak_density_per_second` config knob; default 30 peaks/sec. Wang
+> describes the same density-target idea in §2.2: "we pick a number of
+> spectrogram peaks based on the desired fingerprint density".
+
+## 3. Combinatorial hashing — turning peaks into searchable keys
+
+A single peak `(t, f)` doesn't carry enough information for a fast
+lookup: it has only ~10 bits of frequency entropy and an absolute time
+that changes when you start the clip a second later. Wang's clever
+move (§2.3): **pair each peak with several future peaks in a small
+"target zone", and hash each pair.**
+
+For each anchor peak at `(t_a, f_a)`, walk forward in time to
+candidates `(t_b, f_b)` where:
+
+* `dt = t_b − t_a` ∈ `[1, 100]` frames, and
+* `|f_b − f_a|` ≤ 200 Hz.
+
+Take up to **5** such pairs (the `fan_out` parameter). Each pair
+becomes a 32-bit hash: 9 bits each for `f_a` and `f_b`, 14 bits for
+`dt`. The anchor's absolute time `t_a` rides along separately as
+`anchor_t`. The hash itself is **time-shift invariant** — any clip
+with the same constellation produces the same hash, no matter where it
+starts in the song.
+
+```elixir
+fingerprints = Shazza.DSP.Constellation.hashes(peaks)
+sample = Enum.take(fingerprints, 5)
+
+Enum.map(sample, fn {hash, anchor_t} ->
+  {f1, f2, dt} = Shazza.DSP.Hash.unpack(hash)
+
+  %{
+    hash: Integer.to_string(hash, 16) |> String.pad_leading(8, "0"),
+    anchor_t: anchor_t,
+    f1_bin: f1,
+    f2_bin: f2,
+    delta_frames: dt,
+    f1_hz: f1 * sample_rate / window_size,
+    f2_hz: f2 * sample_rate / window_size,
+    delta_ms: dt * hop_size * 1000 / sample_rate
+  }
+end)
+|> Kino.DataTable.new()
+```
+
+The constellation pairs become more legible if we draw the actual
+target-zone connections: each anchor → up to five lines forward in
+time.
+
+```elixir
+peaks_by_t = Enum.group_by(peaks, fn {t, _f} -> t end)
+
+pairs =
+  fingerprints
+  |> Enum.map(fn {hash, anchor_t} ->
+    {f1, f2, dt} = Shazza.DSP.Hash.unpack(hash)
+    {anchor_t, f1, anchor_t + dt, f2}
+  end)
+  # Just the first 200 pairs to keep the picture readable.
+  |> Enum.take(200)
+
+pair_segments =
+  pairs
+  |> Enum.with_index()
+  |> Enum.flat_map(fn {{t1, f1, t2, f2}, idx} ->
+    [
+      %{
+        pair: idx,
+        time_s: t1 * hop_size / sample_rate,
+        freq_hz: f1 * sample_rate / window_size
+      },
+      %{
+        pair: idx,
+        time_s: t2 * hop_size / sample_rate,
+        freq_hz: f2 * sample_rate / window_size
+      }
+    ]
+  end)
+
+Vl.new(width: 700, height: 360, title: "Constellation hashing — first 200 pairs")
+|> Vl.layers([
+  Vl.new()
+  |> Vl.data_from_values(pair_segments)
+  |> Vl.mark(:line, opacity: 0.4, color: "steelblue")
+  |> Vl.encode_field(:x, "time_s", type: :quantitative, title: "time (s)")
+  |> Vl.encode_field(:y, "freq_hz", type: :quantitative, title: "frequency (Hz)")
+  |> Vl.encode_field(:detail, "pair", type: :nominal),
+  Vl.new()
+  |> Vl.data_from_values(peak_points)
+  |> Vl.mark(:circle, color: "black", size: 35)
+  |> Vl.encode_field(:x, "time_s", type: :quantitative)
+  |> Vl.encode_field(:y, "freq_hz", type: :quantitative)
+])
+```
+
+> **What this is:** `Shazza.DSP.Constellation.hashes/2` walks anchor
+> peaks in time order and pairs each with up to `:fan_out` future
+> peaks inside the target zone, calling `Shazza.DSP.Hash.pack/3` to
+> produce the 32-bit key. The list returned is a flat
+> `[{hash, anchor_t}, …]` — exactly the rows we'll insert into the
+> inverted index.
+
+## 4. The inverted index — fast hash → track lookup
+
+So far everything has been *per-track* work: turn one audio file into a
+list of fingerprints. The index turns that into a *cross-track*
+search. For every fingerprint of every song we store one posting:
+
+```
+hash → [{track_id, anchor_t}, {track_id, anchor_t}, ...]
+```
+
+The same hash will appear in many songs (5 fan-out × 30 peaks/sec ×
+average ~3 min per track ≈ 27 000 entries per track), and one query
+clip looks up every one of its hashes in this map. With a hash index on
+the `hash` column, that's `O(query_hashes)` lookups regardless of how
+many tracks are in the catalogue — Wang 2003, §2.4: "exhaustive table
+search... O(1) per query".
+
+```elixir
+# Run on the in-memory store so this notebook doesn't write to a real DB.
+Shazza.Index.EtsStore.reset()
+{:ok, :ingested, indexed} = Shazza.ingest(fixture_path, title: "Demo Chord")
+
+%{
+  track_id: indexed.id,
+  duration_ms: indexed.duration_ms,
+  fingerprint_count: length(fingerprints)
+}
+```
+
+Look up a single fingerprint and you can see the inverted-index shape:
+multiple `(track_id, anchor_t)` postings keyed by hash. With only one
+track indexed, postings always come from the same track — but every
+hash in the song that hits an anchor more than once still has multiple
+postings.
+
+```elixir
+{example_hash, _} = hd(fingerprints)
+postings = Shazza.Index.EtsStore.lookup(example_hash)
+
+%{hash: example_hash, postings: postings}
+```
+
+> **What this is:** `Shazza.Index.Store` is the behaviour;
+> `Shazza.Index.EtsStore` is the in-memory implementation we just used,
+> and `Shazza.Index.SqliteStore` is the persistent one used by `mix
+> shazza.ingest`. The persistent store batches inserts in transactions
+> of 1000 rows and uses a `CREATE INDEX … ON fingerprints(hash)` to
+> keep lookups O(log N).
+
+## 5. Time-offset histogram — finding the right alignment
+
+Looking up the query's hashes in the index gives a soup of postings:
+every track that ever shared a fingerprint with the query contributes.
+Random hash collisions sprinkle false-positive matches across the
+catalogue. How do we tell signal from noise?
+
+Wang's answer (§2.5): **for every match, compute the time delta**
+`Δ = anchor_t_in_db − anchor_t_in_query` and tally it per track. If the
+query is a real excerpt of a song, *all* its matching anchors land at
+the same `Δ` — the offset where the clip starts in the original. False
+positives, by definition, scatter randomly. The per-track histogram
+peak height is the match score; its location is the offset.
+
+Cut a 3-second clip starting at ~5 seconds in, then identify it. The
+histogram should peak sharply at `Δ ≈ 5 s`.
+
+```elixir
+clip_path = Path.join(System.tmp_dir!(), "shazza_demo_clip.wav")
+
+{_, 0} =
+  System.cmd("ffmpeg", [
+    "-y",
+    "-loglevel",
+    "error",
+    "-ss",
+    "5",
+    "-t",
+    "3",
+    "-i",
+    fixture_path,
+    "-ac",
+    "1",
+    clip_path
+  ])
+
+{:ok, result} = Shazza.identify(clip_path)
+
+%{
+  matched_track: result.track.title,
+  score: result.score,
+  runner_up: result.second_best_score,
+  offset_seconds: Float.round(result.offset_seconds, 3),
+  expected_offset_seconds: 5.0
+}
+```
+
+Run the same scoring math by hand to draw the histogram. The Δ peak is
+the score; bin counts everywhere else are noise.
+
+```elixir
+{:ok, %{fingerprints: query_fps, sample_rate: q_sr}} =
+  Shazza.Pipeline.fingerprint(clip_path)
+
+postings_map =
+  query_fps
+  |> Enum.map(fn {hash, _} -> hash end)
+  |> Shazza.Index.EtsStore.lookup_many()
+
+deltas =
+  Enum.flat_map(query_fps, fn {hash, query_t} ->
+    postings_map
+    |> Map.get(hash, [])
+    |> Enum.map(fn {_track_id, db_t} -> db_t - query_t end)
+  end)
+
+# Convert frame deltas to seconds and bucket coarsely (one bucket per frame).
+seconds_per_frame = hop_size / q_sr
+
+histogram =
+  deltas
+  |> Enum.frequencies()
+  |> Enum.map(fn {delta_frames, count} ->
+    %{delta_seconds: delta_frames * seconds_per_frame, count: count}
+  end)
+
+Vl.new(width: 700, height: 260, title: "Time-offset histogram (clip starts at t=5 s)")
+|> Vl.data_from_values(histogram)
+|> Vl.mark(:bar)
+|> Vl.encode_field(:x, "delta_seconds",
+  type: :quantitative,
+  title: "Δ = db_anchor − query_anchor (s)"
+)
+|> Vl.encode_field(:y, "count", type: :quantitative, title: "matching pairs")
+```
+
+> **What this is:** `Shazza.Match.Scorer.best_match/4` builds the same
+> histogram across all tracks at once, picks the largest bucket, and
+> returns the winning track plus the runner-up bucket count for a
+> confidence floor. The peak in the chart above is exactly that
+> winning bucket.
+
+## 6. Putting it all together
+
+Everything we just walked through is `Shazza.identify/2` in nine
+lines:
+
+```elixir
+identify_demo = fn path ->
+  {:ok, %{fingerprints: fps, sample_rate: sr}} = Shazza.Pipeline.fingerprint(path)
+  hashes = Enum.map(fps, fn {hash, _t} -> hash end)
+  postings = Shazza.Index.EtsStore.lookup_many(hashes)
+  Shazza.Match.Scorer.best_match(fps, postings, Shazza.Index.EtsStore,
+    sample_rate: sr,
+    min_score: 5
+  )
+end
+
+identify_demo.(clip_path)
+```
+
+For real-world use the persistent SqliteStore swaps in for EtsStore,
+and `Shazza.Audio.Decoder.stream/1` feeds the pipeline in fixed-size
+chunks so memory stays bounded for hours-long files. Otherwise
+everything is identical to what's running here.
+
+## What to try next
+
+* Re-run the cells with a real music clip — drop a path into
+  `fixture_path` and the rest of the notebook will pick it up.
+* Tweak `Shazza.Config` knobs: `peak_density_per_second`,
+  `target_zone_max_dt`, `fan_out`. The constellation plot in §3 is the
+  fastest way to see what each one changes.
+* Mix white noise into the query (FFmpeg `anoisesrc` filter) and watch
+  the histogram peak shrink relative to its background. The
+  `bench/recognition.exs` script does this systematically.
+
+```elixir
+File.rm(clip_path)
+:ok
+```
