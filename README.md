@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kipcole9/shazza/main/logo.png" alt="Shazza logo — a constellation of peak fingerprints" width="160">
+</p>
+
 # Shazza
 
 [![Hex.pm](https://img.shields.io/hexpm/v/shazza.svg)](https://hex.pm/packages/shazza) [![Documentation](https://img.shields.io/badge/docs-hexdocs-blue.svg)](https://hexdocs.pm/shazza) [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/kipcole9/shazza/blob/main/LICENSE.md)

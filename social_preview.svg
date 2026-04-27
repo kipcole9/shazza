@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <title>Shazza — audio fingerprinting in Elixir</title>
+
+  <!-- Slate-900 background. -->
+  <rect width="1280" height="640" fill="#0F172A"/>
+
+  <!-- Faint frequency-band lines stretching the full banner. -->
+  <g stroke="#1E293B" stroke-width="1.5" opacity="0.7">
+    <line x1="80"  y1="200" x2="1200" y2="200"/>
+    <line x1="80"  y1="320" x2="1200" y2="320"/>
+    <line x1="80"  y1="440" x2="1200" y2="440"/>
+  </g>
+
+  <!-- Constellation hash-pair lines. Always sloping forward (left → right). -->
+  <g stroke="#38BDF8" stroke-width="2.5" opacity="0.75" fill="none" stroke-linecap="round">
+    <line x1="120"  y1="208" x2="320"  y2="180"/>
+    <line x1="120"  y1="208" x2="280"  y2="328"/>
+    <line x1="320"  y1="180" x2="500"  y2="216"/>
+    <line x1="280"  y1="328" x2="440"  y2="312"/>
+    <line x1="280"  y1="328" x2="380"  y2="448"/>
+    <line x1="380"  y1="448" x2="560"  y2="436"/>
+    <line x1="500"  y1="216" x2="640"  y2="196"/>
+    <line x1="440"  y1="312" x2="640"  y2="324"/>
+    <line x1="560"  y1="436" x2="720"  y2="452"/>
+  </g>
+
+  <!-- Constellation peak dots, distributed across the left ⅔ of the banner. -->
+  <g fill="#F8FAFC">
+    <circle cx="120"  cy="208" r="6"/>
+    <circle cx="200"  cy="172" r="4"/>
+    <circle cx="320"  cy="180" r="7"/>
+    <circle cx="400"  cy="208" r="4"/>
+    <circle cx="500"  cy="216" r="6"/>
+    <circle cx="560"  cy="180" r="4"/>
+    <circle cx="640"  cy="196" r="5"/>
+    <circle cx="200"  cy="316" r="4"/>
+    <circle cx="280"  cy="328" r="7"/>
+    <circle cx="360"  cy="296" r="3"/>
+    <circle cx="440"  cy="312" r="6"/>
+    <circle cx="540"  cy="332" r="4"/>
+    <circle cx="640"  cy="324" r="5"/>
+    <circle cx="160"  cy="452" r="5"/>
+    <circle cx="240"  cy="424" r="3"/>
+    <circle cx="380"  cy="448" r="6"/>
+    <circle cx="480"  cy="424" r="3"/>
+    <circle cx="560"  cy="436" r="6"/>
+    <circle cx="720"  cy="452" r="4"/>
+  </g>
+
+  <!-- Wordmark + tagline on the right. -->
+  <g fill="#F8FAFC" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+    <text x="820" y="320" font-size="120" font-weight="700" letter-spacing="-3">Shazza</text>
+    <text x="820" y="380" font-size="28" font-weight="400" fill="#94A3B8">
+      Audio fingerprinting in Elixir
+    </text>
+    <text x="820" y="424" font-size="22" font-weight="400" fill="#38BDF8">
+      Wang/Shazam, Nx + EXLA, mix-task ready
+    </text>
+  </g>
+</svg>
