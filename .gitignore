@@ -45,4 +45,7 @@ shazza-*.tar
 .elixir_ls/
 .idea/
 .vscode/
+.mise.toml
+mise.toml
+.tool-versions
 
